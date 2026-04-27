@@ -8,7 +8,7 @@ begin
     rng = StableRNG(idx)
     lb = (-π, -π)
     ub = (1*π, 1*π)
-    points = QuasiMonteCarlo.sample(1_000, lb, ub, HaltonSample())
+    points = QuasiMonteCarlo.sample(500, lb, ub, HaltonSample())
     ch = convex_hull(points)
         
     tri = triangulate(points; boundary_nodes=ch.vertices, rng)
@@ -21,6 +21,20 @@ begin
     fig1
 end
 
+function clean_points(points; tol=1e-10)
+    kept = Vector{Int}()
+    for j in axes(points,2)
+        x = points[:,j]
+        if all(norm(x - points[:,i]) > tol for i in kept)
+            push!(kept,j)
+        end
+    end
+    return points[:,kept]
+end
+
+points = clean_points(points; tol=1e-8)
+
+
 using DelaunayTriangulation
 
 tri = triangulate(points)
@@ -31,11 +45,11 @@ using Gmsh
 gmsh.initialize()
 gmsh.model.add("cloud_hull")
 
-lc = 0.35   # target mesh size
+lc = 0.45   # target mesh size
 
 pids = Int[]
 
-for i in hull.vertices
+for i in hull.vertices[1:end-1]
     x = points[1, i]
     y = points[2, i]
     push!(pids, gmsh.model.geo.addPoint(x, y, 0.0, lc))
@@ -75,7 +89,7 @@ using GridapGmsh
 
 model = GmshDiscreteModel("cloud_hull.msh")
 
-order = 2
+order = 3
 reffe = ReferenceFE(lagrangian, Float64, order)
 
 V = TestFESpace(
@@ -98,4 +112,15 @@ a(u, v) = ∫( ∇(v) ⋅ ∇(u) )dΩ
 l(v)    = ∫( v * f )dΩ
 
 op = AffineFEOperator(a, l, U, V)
-A = get_matrix(op)
+A = Matrix(get_matrix(op))
+b = get_vector(op)
+u = A \ b
+uh = solve(op)
+
+
+using CairoMakie
+using GridapMakie
+using GLMakie
+
+fig, ax, plt = plot(Ω, uh, shading=true)
+Colorbar(fig[1,2], plt)
