@@ -8,10 +8,11 @@ begin
     rng = StableRNG(idx)
     lb = (-π, -π)
     ub = (1*π, 1*π)
-    points = QuasiMonteCarlo.sample(1_000, lb, ub, LatinHypercubeSample())
-    tri = triangulate(points; rng)
-
+    points = QuasiMonteCarlo.sample(1_000, lb, ub, HaltonSample())
     ch = convex_hull(points)
+        
+    tri = triangulate(points; boundary_nodes=ch.vertices, rng)
+
     ch_points = [get_point(tri, i) for i in DelaunayTriangulation.get_vertices(ch)]
     fig1, ax, sc = lines(ch_points, color = :red, linewidth = 4)
     scatter!(ax, points)
@@ -20,26 +21,81 @@ begin
     fig1
 end
 
-function target_function(X::Matrix)
-    M = size(X,2)
-    Y = zeros(1,M)
-    f = (x,y) -> sin(x)*sin(y) + sin(4*x)*sin(4*y)
-    for i=1:M
-        x = X[:,i]
-        Y[1,i] = f(x[1], x[2])
-    end
-    return Y
+using DelaunayTriangulation
+
+tri = triangulate(points)
+hull = convex_hull(tri)
+
+using Gmsh
+
+gmsh.initialize()
+gmsh.model.add("cloud_hull")
+
+lc = 0.35   # target mesh size
+
+pids = Int[]
+
+for i in hull.vertices
+    x = points[1, i]
+    y = points[2, i]
+    push!(pids, gmsh.model.geo.addPoint(x, y, 0.0, lc))
 end
 
-function get_hull_points(points)
-    ch = convex_hull(points)
-    ch_points = [collect(get_point(tri, i)) for i in DelaunayTriangulation.get_vertices(ch)]
-    return reduce(hcat, ch_points)
+lids = Int[]
+n = length(pids)
+
+for i in 1:n
+    p1 = pids[i]
+    p2 = pids[mod1(i+1, n)]
+    push!(lids, gmsh.model.geo.addLine(p1, p2))
 end
 
-X = points
-Y = target_function(X)
+loop = gmsh.model.geo.addCurveLoop(lids)
+surf = gmsh.model.geo.addPlaneSurface([loop])
 
-X_hull = get_hull_points(points)
-Y_hull = target_function(X_hull)
+gmsh.model.geo.synchronize()
 
+gmsh.model.addPhysicalGroup(2, [surf], 1)
+gmsh.model.setPhysicalName(2, 1, "domain")
+
+gmsh.model.addPhysicalGroup(1, lids, 2)
+gmsh.model.setPhysicalName(1, 2, "boundary")
+
+gmsh.model.mesh.generate(2)
+gmsh.write("cloud_hull.msh")
+gmsh.finalize()
+
+gmsh.initialize()
+gmsh.open("cloud_hull.msh")
+gmsh.fltk.run()   # launches GUI
+gmsh.finalize()
+
+using Gridap
+using GridapGmsh
+
+model = GmshDiscreteModel("cloud_hull.msh")
+
+order = 2
+reffe = ReferenceFE(lagrangian, Float64, order)
+
+V = TestFESpace(
+    model,
+    reffe;
+    dirichlet_tags = ["boundary"]
+)
+
+g(x) = 1
+U = TrialFESpace(V, g)
+
+degree = 2 * order
+Ω = GridapGmsh.Triangulation(model)
+dΩ = Measure(Ω, degree)
+
+# Right-hand side
+f(x) = 1.0
+
+a(u, v) = ∫( ∇(v) ⋅ ∇(u) )dΩ
+l(v)    = ∫( v * f )dΩ
+
+op = AffineFEOperator(a, l, U, V)
+A = get_matrix(op)
